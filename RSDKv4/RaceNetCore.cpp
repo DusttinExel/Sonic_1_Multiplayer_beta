@@ -310,3 +310,6 @@ void RaceNetCore::poll()
             rm.active = false;
     }
 }
+
+constexpr int RaceNetCore::TIMEOUT_MS;
+constexpr size_t RaceNetCore::PACKET_BYTES;
