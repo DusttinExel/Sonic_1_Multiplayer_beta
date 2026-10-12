@@ -274,6 +274,11 @@ void InitUserdata()
         ini.SetString("Network", "Host", (char *)"127.0.0.1");
         StrCopy(networkHost, "127.0.0.1");
         ini.SetInteger("Network", "Port", networkPort = 50);
+
+        ini.SetInteger("Multiplayer", "Mode", raceMode = 0);
+        ini.SetString("Multiplayer", "Address", (char *)"127.0.0.1");
+        StrCopy(raceHostAddress, "127.0.0.1");
+        ini.SetInteger("Multiplayer", "Port", racePort = 7777);
 #endif
 
         ini.SetBool("Window", "FullScreen", Engine.startFullScreen = DEFAULT_FULLSCREEN);
@@ -426,6 +431,13 @@ void InitUserdata()
             StrCopy(networkHost, "127.0.0.1");
         if (!ini.GetInteger("Network", "Port", &networkPort))
             networkPort = 50;
+
+        if (!ini.GetInteger("Multiplayer", "Mode", &raceMode))
+            raceMode = 0;
+        if (!ini.GetString("Multiplayer", "Address", raceHostAddress))
+            StrCopy(raceHostAddress, "127.0.0.1");
+        if (!ini.GetInteger("Multiplayer", "Port", &racePort))
+            racePort = 7777;
 #endif
 
         if (!ini.GetBool("Window", "FullScreen", &Engine.startFullScreen))
@@ -706,6 +718,14 @@ void WriteSettings()
     ini.SetString("Network", "Host", networkHost);
     ini.SetComment("Network", "PortComment", "The port the game will try to connect to.");
     ini.SetInteger("Network", "Port", networkPort);
+
+    ini.SetComment("Multiplayer", "ModeComment",
+                   "Race multiplayer for any stage: 0 = off, 1 = host a room, 2 = join a room at Address");
+    ini.SetInteger("Multiplayer", "Mode", raceMode);
+    ini.SetComment("Multiplayer", "AddressComment", "The host's IP address (only used when Mode = 2)");
+    ini.SetString("Multiplayer", "Address", raceHostAddress);
+    ini.SetComment("Multiplayer", "PortComment", "UDP port. The host must allow it through the firewall / port forward it");
+    ini.SetInteger("Multiplayer", "Port", racePort);
 #endif
 
     ini.SetComment("Window", "FSComment", "Determines if the window will be fullscreen or not");

@@ -246,6 +246,9 @@ void ProcessStage(void)
 
             // Update
             ProcessObjects();
+#if RETRO_USE_NETWORKING
+            RaceNet_Update();
+#endif
 
             if (cameraTarget > -1) {
                 if (cameraEnabled == 1) {

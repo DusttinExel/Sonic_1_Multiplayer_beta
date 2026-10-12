@@ -6,7 +6,7 @@ void MultiplayerButton_Create(void *objPtr)
     self->textureCircle = LoadTexture("Data/Game/Menu/Circle.png", TEXFMT_RGBA4444);
 
     int texture            = LoadTexture("Data/Game/Menu/Intro.png", TEXFMT_RGBA4444);
-    self->meshVS           = LoadMesh("Data/Game/Models/2PVS.bin", texture);
+    self->meshVS           = LoadMesh("Data/Game/Models/TimeAttack.bin", texture);
     self->x                = 0.0;
     self->y                = 16.0;
     self->z                = 160.0;
@@ -18,7 +18,7 @@ void MultiplayerButton_Create(void *objPtr)
     self->labelPtr->scale  = 0.15;
     self->labelPtr->alpha  = 0;
     self->labelPtr->state  = TEXTLABEL_STATE_IDLE;
-    SetStringToFont(self->labelPtr->text, str2PlayerVS, FONT_HEADING);
+    SetStringToFont8(self->labelPtr->text, "2P VS", FONT_HEADING);
     self->labelPtr->alignPtr(self->labelPtr, ALIGN_CENTER);
 }
 void MultiplayerButton_Main(void *objPtr)

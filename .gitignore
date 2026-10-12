@@ -291,3 +291,6 @@ android/local.properties
 .flatpak-builder
 flatpak/*.apk
 build-dir
+build/
+mods/
+*.rsdk

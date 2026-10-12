@@ -1,0 +1,773 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d32dcc2..a94eac0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -37,6 +37,8 @@ set(RETRO_FILES
+     RSDKv4/Math.cpp
+     RSDKv4/ModAPI.cpp
+     RSDKv4/Networking.cpp
++    RSDKv4/RaceNet.cpp
++    RSDKv4/RaceNetCore.cpp
+     RSDKv4/Object.cpp
+     RSDKv4/Palette.cpp
+     RSDKv4/Reader.cpp
+diff --git a/RSDKv4/Drawing.cpp b/RSDKv4/Drawing.cpp
+index 9f4b6d2..994d3c8 100644
+--- a/RSDKv4/Drawing.cpp
++++ b/RSDKv4/Drawing.cpp
+@@ -1241,6 +1241,10 @@ void DrawStageGFX()
+         DrawObjectList(6);
+     }
+ 
++#if RETRO_USE_NETWORKING
++    RaceNet_Draw();
++#endif
++
+ #if !RETRO_USE_ORIGINAL_CODE
+     if (drawStageGFXHQ)
+         DrawDebugOverlays();
+diff --git a/RSDKv4/RaceNet.cpp b/RSDKv4/RaceNet.cpp
+new file mode 100644
+index 0000000..3f9800b
+--- /dev/null
++++ b/RSDKv4/RaceNet.cpp
+@@ -0,0 +1,180 @@
++#include "RetroEngine.hpp"
++
++#if RETRO_USE_NETWORKING
++#include "RaceNetCore.hpp"
++#include "RaceNet.hpp"
++
++int raceMode = 0;
++char raceHostAddress[64] = "127.0.0.1";
++int racePort = 7777;
++
++static RaceNetCore net;
++static bool started = false;
++static int frameTick = 0;
++
++// Finish tracking
++static int lastStage = -1;                 // (list << 8) | position we were in last frame
++static uint32_t finishMs  = 0;
++static uint8_t finishedPos = 0xFF;
++static int stageFirstFinisher[256];        // per stage position: id of whoever finished first (-1 none)
++static uint32_t stageFirstTime[256];
++static bool announced[RN_MAX_PLAYERS][256];
++
++static int LocalStage() { return (activeStageList << 8) | (stageListPosition & 0xFF); }
++
++void RaceNet_Init()
++{
++    for (int i = 0; i < 256; ++i) stageFirstFinisher[i] = -1;
++    memset(announced, 0, sizeof(announced));
++
++    if (raceMode != 1 && raceMode != 2)
++        return;
++
++    std::string err;
++    if (!net.start(raceMode == 1 ? RN_HOST : RN_CLIENT, raceHostAddress, (uint16_t)racePort, &err)) {
++        PrintLog("RaceNet: could not start (%s)", err.c_str());
++        return;
++    }
++    started = true;
++    if (raceMode == 1)
++        PrintLog("RaceNet: hosting on UDP port %d", racePort);
++    else
++        PrintLog("RaceNet: joining %s:%d", raceHostAddress, racePort);
++}
++
++void RaceNet_Release()
++{
++    if (started)
++        net.stop();
++    started = false;
++}
++
++// Returns the entity slot of the local player, or -1.
++static int LocalPlayerSlot()
++{
++    if (cameraTarget < 0 || cameraTarget >= ENTITY_COUNT)
++        return -1;
++    if (objectEntityList[cameraTarget].type == OBJ_TYPE_BLANKOBJECT)
++        return -1;
++    return cameraTarget;
++}
++
++static void CheckAnnouncements()
++{
++    // Whoever's finish for a stage has the lowest host time is the winner of that stage.
++    const auto &remotes = net.getRemotes();
++    for (int i = 0; i < RN_MAX_PLAYERS; ++i) {
++        uint8_t pos;
++        uint32_t t;
++        if (i == net.getLocalId()) {
++            pos = finishedPos;
++            t   = finishMs;
++        }
++        else if (remotes[i].active) {
++            pos = remotes[i].state.finishedPos;
++            t   = remotes[i].state.finishMs;
++        }
++        else
++            continue;
++
++        if (pos == 0xFF || announced[i][pos])
++            continue;
++        announced[i][pos] = true;
++
++        if (stageFirstFinisher[pos] < 0 || t < stageFirstTime[pos]) {
++            bool firstEver = stageFirstFinisher[pos] < 0;
++            stageFirstFinisher[pos] = i;
++            stageFirstTime[pos]     = t;
++            if (firstEver)
++                PrintLog("RaceNet: player %d finished stage %d first (%.2fs)", i, pos, t / 1000.0f);
++        }
++    }
++}
++
++void RaceNet_Update()
++{
++    if (!started)
++        return;
++
++    net.poll();
++
++    // The host has no id until a client joins; clients have none until welcomed.
++    if (!net.connected())
++        return;
++
++    int slot = LocalPlayerSlot();
++    if (slot < 0)
++        return;
++
++    // Detect "finished a stage": we moved on to the next position in the same list.
++    int stage = LocalStage();
++    if (lastStage >= 0 && stage != lastStage && (stage >> 8) == (lastStage >> 8) && (stage & 0xFF) == (lastStage & 0xFF) + 1) {
++        finishedPos = (uint8_t)(lastStage & 0xFF);
++        finishMs    = net.hostTimeMs();
++        PrintLog("RaceNet: you finished stage %d", finishedPos);
++    }
++    lastStage = stage;
++
++    if (++frameTick & 1) // 30 updates per second is plenty
++        return;
++
++    Entity *p = &objectEntityList[slot];
++    RaceState s;
++    s.stage       = (uint16_t)stage;
++    s.xpos        = p->xpos;
++    s.ypos        = p->ypos;
++    s.rotation    = (int16_t)p->rotation;
++    s.animation   = p->animation;
++    s.frame       = p->frame;
++    s.direction   = p->direction;
++    s.flags       = p->visible ? RN_FLAG_VISIBLE : 0;
++    s.finishMs    = finishMs;
++    s.finishedPos = finishedPos;
++    net.sendState(s);
++
++    CheckAnnouncements();
++}
++
++void RaceNet_Draw()
++{
++    if (!started || !net.connected())
++        return;
++
++    int slot = LocalPlayerSlot();
++    if (slot < 0)
++        return;
++
++    // Use the local player's animation data for everyone (same character everywhere).
++    ObjectScript *script = &objectScriptList[objectEntityList[slot].type];
++    if (!script->animFile)
++        return;
++
++    const int stage   = LocalStage();
++    const auto &rem   = net.getRemotes();
++    for (int i = 0; i < RN_MAX_PLAYERS; ++i) {
++        if (i == net.getLocalId() || !rem[i].active)
++            continue;
++        const RaceState &r = rem[i].state;
++        if (r.stage != stage || !(r.flags & RN_FLAG_VISIBLE))
++            continue; // other player is in a different stage (or hidden)
++
++        Entity ghost;
++        memset(&ghost, 0, sizeof(ghost));
++        ghost.xpos      = r.xpos;
++        ghost.ypos      = r.ypos;
++        ghost.rotation  = r.rotation;
++        ghost.animation = r.animation;
++        ghost.frame     = r.frame;
++        ghost.direction = r.direction;
++        ghost.visible   = 1;
++
++        int x = (ghost.xpos >> 16) - xScrollOffset;
++        int y = (ghost.ypos >> 16) - yScrollOffset;
++        if (x < -64 || x > SCREEN_XSIZE + 64 || y < -64 || y > SCREEN_YSIZE + 64)
++            continue;
++
++        DrawObjectAnimation(script, &ghost, x, y);
++    }
++}
++
++#endif
+diff --git a/RSDKv4/RaceNet.hpp b/RSDKv4/RaceNet.hpp
+new file mode 100644
+index 0000000..08c46a7
+--- /dev/null
++++ b/RSDKv4/RaceNet.hpp
+@@ -0,0 +1,26 @@
++#ifndef RACENET_H
++#define RACENET_H
++
++// Engine glue for the Sonic 1 / RSDKv4 multiplayer (race mode).
++// Every player runs their own copy of the stage; the other players are drawn as
++// "ghosts" using the local player's own animation data, so no game scripts need changing.
++
++#if RETRO_USE_NETWORKING
++
++extern int raceMode;           // 0 = off, 1 = host, 2 = join   (settings.ini [Multiplayer] Mode)
++extern char raceHostAddress[64]; // address to join                (settings.ini [Multiplayer] Address)
++extern int racePort;           // UDP port                        (settings.ini [Multiplayer] Port)
++
++void RaceNet_Init();      // call once after settings are loaded
++void RaceNet_Update();    // call once per frame, right after ProcessObjects() in a normal stage step
++void RaceNet_Draw();      // call at the end of the stage draw, draws the other players
++void RaceNet_Release();   // call on shutdown
++
++#else
++inline void RaceNet_Init() {}
++inline void RaceNet_Update() {}
++inline void RaceNet_Draw() {}
++inline void RaceNet_Release() {}
++#endif
++
++#endif
+diff --git a/RSDKv4/RaceNetCore.cpp b/RSDKv4/RaceNetCore.cpp
+new file mode 100644
+index 0000000..81b8fd6
+--- /dev/null
++++ b/RSDKv4/RaceNetCore.cpp
+@@ -0,0 +1,312 @@
++#include "RaceNetCore.hpp"
++
++using asio::ip::udp;
++using Clock = std::chrono::steady_clock;
++
++// ---------------------------------------------------------------- wire format
++// 29 bytes, little endian:
++//  0  u32 magic   4 u8 version   5 u8 type   6 u8 playerId   7 u8 flags
++//  8  u16 stage   10 i32 x       14 i32 y    18 i16 rotation
++//  20 u8 anim     21 u8 frame    22 u8 dir   23 u8 role       24 u32 finishMs
++//  28 u8 finishedPos
++
++static void put16(uint8_t *p, uint16_t v) { p[0] = v & 0xFF; p[1] = v >> 8; }
++static void put32(uint8_t *p, uint32_t v)
++{
++    for (int i = 0; i < 4; ++i) p[i] = (v >> (8 * i)) & 0xFF;
++}
++static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
++static uint32_t get32(const uint8_t *p)
++{
++    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++void RaceNetCore::encode(uint8_t type, const RaceState &s, uint8_t *o)
++{
++    memset(o, 0, PACKET_BYTES);
++    put32(o + 0, RN_MAGIC);
++    o[4] = RN_VERSION;
++    o[5] = type;
++    o[6] = s.playerId;
++    o[7] = s.flags;
++    put16(o + 8, s.stage);
++    put32(o + 10, (uint32_t)s.xpos);
++    put32(o + 14, (uint32_t)s.ypos);
++    put16(o + 18, (uint16_t)s.rotation);
++    o[20] = s.animation;
++    o[21] = s.frame;
++    o[22] = s.direction;
++    o[23] = s.role;
++    put32(o + 24, s.finishMs);
++    o[28] = s.finishedPos;
++}
++
++bool RaceNetCore::decode(const uint8_t *in, size_t len, uint8_t *type, RaceState *s)
++{
++    if (len != PACKET_BYTES || get32(in) != RN_MAGIC || in[4] != RN_VERSION)
++        return false;
++    *type        = in[5];
++    s->playerId  = in[6];
++    s->flags     = in[7];
++    s->stage     = get16(in + 8);
++    s->xpos      = (int32_t)get32(in + 10);
++    s->ypos      = (int32_t)get32(in + 14);
++    s->rotation  = (int16_t)get16(in + 18);
++    s->animation = in[20];
++    s->frame     = in[21];
++    s->direction = in[22];
++    s->role      = in[23];
++    s->finishMs  = get32(in + 24);
++    s->finishedPos = in[28];
++    return s->playerId < RN_MAX_PLAYERS;
++}
++
++// ---------------------------------------------------------------- lifecycle
++bool RaceNetCore::start(RaceNetRole r, const std::string &host, uint16_t port, std::string *err)
++{
++    stop();
++    try {
++        asio::error_code ec;
++        if (r == RN_HOST) {
++            socket.open(udp::v4());
++            socket.bind(udp::endpoint(udp::v4(), port));
++            localId = 0;
++        }
++        else if (r == RN_CLIENT) {
++            udp::resolver resolver(io);
++            auto results = resolver.resolve(udp::v4(), host, std::to_string(port), ec);
++            if (ec || results.empty()) {
++                if (err)
++                    *err = "could not resolve host '" + host + "'";
++                return false;
++            }
++            hostEndpoint = *results.begin();
++            socket.open(udp::v4());
++            socket.bind(udp::endpoint(udp::v4(), 0));
++            localId = -1;
++        }
++        else {
++            return false;
++        }
++        socket.non_blocking(true);
++    } catch (std::exception &e) {
++        if (err)
++            *err = e.what();
++        if (socket.is_open()) {
++            asio::error_code ignore;
++            socket.close(ignore);
++        }
++        return false;
++    }
++
++    role      = r;
++    rejected  = false;
++    startTime = Clock::now();
++    lastHello    = startTime - std::chrono::seconds(1); // send HELLO on the first poll
++    lastHostSeen = startTime;
++    for (auto &rm : remotes) rm = RaceRemote();
++    return true;
++}
++
++void RaceNetCore::stop()
++{
++    if (role == RN_OFF)
++        return;
++
++    // Best effort goodbye so the others drop our ghost immediately.
++    RaceState bye;
++    bye.playerId = (uint8_t)(localId < 0 ? 0 : localId);
++    uint8_t buf[PACKET_BYTES];
++    encode(RNP_BYE, bye, buf);
++    if (role == RN_CLIENT && localId >= 0) {
++        send(buf, hostEndpoint);
++    }
++    else if (role == RN_HOST) {
++        for (auto &rm : remotes)
++            if (rm.active)
++                send(buf, rm.endpoint);
++    }
++
++    asio::error_code ignore;
++    socket.close(ignore);
++    role    = RN_OFF;
++    localId = -1;
++    for (auto &rm : remotes) rm = RaceRemote();
++}
++
++uint32_t RaceNetCore::hostTimeMs() const
++{
++    int64_t local = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - startTime).count();
++    return (uint32_t)(local + clockOffsetMs);
++}
++
++// ---------------------------------------------------------------- io
++void RaceNetCore::send(const uint8_t *buf, const udp::endpoint &to)
++{
++    asio::error_code ec;
++    socket.send_to(asio::buffer(buf, PACKET_BYTES), to, 0, ec); // UDP: drops are fine, never block
++}
++
++int RaceNetCore::findClient(const udp::endpoint &ep) const
++{
++    for (int i = 1; i < RN_MAX_PLAYERS; ++i)
++        if (remotes[i].active && remotes[i].endpoint == ep)
++            return i;
++    return -1;
++}
++
++void RaceNetCore::sendState(const RaceState &in)
++{
++    if (role == RN_OFF || !connected())
++        return;
++
++    RaceState s  = in;
++    s.playerId   = (uint8_t)localId;
++    uint8_t buf[PACKET_BYTES];
++    encode(RNP_STATE, s, buf);
++
++    if (role == RN_CLIENT)
++        send(buf, hostEndpoint);
++    else
++        for (int i = 1; i < RN_MAX_PLAYERS; ++i)
++            if (remotes[i].active)
++                send(buf, remotes[i].endpoint);
++}
++
++void RaceNetCore::handle(const uint8_t *buf, size_t len, const udp::endpoint &from)
++{
++    uint8_t type = 0;
++    RaceState s;
++    if (!decode(buf, len, &type, &s))
++        return;
++
++    const auto now = Clock::now();
++
++    if (role == RN_HOST) {
++        int id = findClient(from);
++        switch (type) {
++            case RNP_HELLO: {
++                if (id < 0) {
++                    for (int i = 1; i < RN_MAX_PLAYERS; ++i) {
++                        if (!remotes[i].active) {
++                            id                  = i;
++                            remotes[i]          = RaceRemote();
++                            remotes[i].active   = true;
++                            remotes[i].endpoint = from;
++                            remotes[i].state.playerId = (uint8_t)i;
++                            break;
++                        }
++                    }
++                }
++                RaceState reply;
++                uint8_t out[PACKET_BYTES];
++                if (id < 0) {
++                    encode(RNP_FULL, reply, out);
++                }
++                else {
++                    remotes[id].lastSeen = now;
++                    reply.playerId       = (uint8_t)id;
++                    reply.finishMs       = hostTimeMs();
++                    encode(RNP_WELCOME, reply, out);
++                }
++                send(out, from);
++                break;
++            }
++            case RNP_STATE: {
++                if (id < 0)
++                    break; // not welcomed yet
++                s.playerId           = (uint8_t)id; // never trust the id the client claims
++                remotes[id].state    = s;
++                remotes[id].lastSeen = now;
++                uint8_t out[PACKET_BYTES];
++                encode(RNP_STATE, s, out);
++                for (int i = 1; i < RN_MAX_PLAYERS; ++i)
++                    if (i != id && remotes[i].active)
++                        send(out, remotes[i].endpoint);
++                break;
++            }
++            case RNP_BYE: {
++                if (id < 0)
++                    break;
++                remotes[id].active = false;
++                RaceState gone;
++                gone.playerId = (uint8_t)id;
++                uint8_t out[PACKET_BYTES];
++                encode(RNP_BYE, gone, out);
++                for (int i = 1; i < RN_MAX_PLAYERS; ++i)
++                    if (remotes[i].active)
++                        send(out, remotes[i].endpoint);
++                break;
++            }
++        }
++    }
++    else if (role == RN_CLIENT) {
++        if (from != hostEndpoint)
++            return;
++        lastHostSeen = now;
++        switch (type) {
++            case RNP_WELCOME:
++                clockOffsetMs = (int64_t)s.finishMs
++                                - std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
++                localId = s.playerId;
++                if (localId == 0)
++                    localId = -1; // host id is reserved, a valid WELCOME is never 0
++                break;
++            case RNP_FULL: rejected = true; break;
++            case RNP_STATE:
++                if ((int)s.playerId == localId)
++                    break;
++                remotes[s.playerId].active   = true;
++                remotes[s.playerId].state    = s;
++                remotes[s.playerId].lastSeen = now;
++                break;
++            case RNP_BYE: remotes[s.playerId].active = false; break;
++        }
++    }
++}
++
++void RaceNetCore::poll()
++{
++    if (role == RN_OFF)
++        return;
++
++    const auto now = Clock::now();
++
++    // Drain the socket.
++    uint8_t buf[256];
++    for (int guard = 0; guard < 512; ++guard) {
++        udp::endpoint from;
++        asio::error_code ec;
++        size_t n = socket.receive_from(asio::buffer(buf), from, 0, ec);
++        if (ec == asio::error::would_block || ec == asio::error::try_again)
++            break;
++        if (ec)
++            continue; // e.g. ICMP "connection reset" on Windows, ignore
++        handle(buf, n, from);
++    }
++
++    // Client: knock until welcomed, then keep knocking once a second as a keepalive
++    // (the host drops clients that go quiet, e.g. while sitting in a menu).
++    if (role == RN_CLIENT && !rejected
++        && now - lastHello >= std::chrono::milliseconds(localId < 0 ? 500 : 1000)) {
++        lastHello = now;
++        RaceState hello;
++        uint8_t out[PACKET_BYTES];
++        encode(RNP_HELLO, hello, out);
++        send(out, hostEndpoint);
++    }
++
++    if (role == RN_CLIENT && localId >= 0 && now - lastHostSeen > std::chrono::milliseconds(TIMEOUT_MS)) {
++        localId = -1; // host went away, go back to knocking
++        for (auto &rm : remotes) rm.active = false;
++    }
++
++    // Time out silent peers.
++    for (int i = 0; i < RN_MAX_PLAYERS; ++i) {
++        RaceRemote &rm = remotes[i];
++        if (!rm.active)
++            continue;
++        if (now - rm.lastSeen > std::chrono::milliseconds(TIMEOUT_MS))
++            rm.active = false;
++    }
++}
+diff --git a/RSDKv4/RaceNetCore.hpp b/RSDKv4/RaceNetCore.hpp
+new file mode 100644
+index 0000000..b36e7cc
+--- /dev/null
++++ b/RSDKv4/RaceNetCore.hpp
+@@ -0,0 +1,112 @@
++#ifndef RACENET_CORE_H
++#define RACENET_CORE_H
++
++// Engine-independent UDP layer for the race / hide-and-seek multiplayer.
++// Topology: one host + up to (RN_MAX_PLAYERS - 1) clients. The host relays every
++// client's state to all the other clients. Polling is non-blocking and meant to be
++// called once per game frame from the main thread (no extra threads, no locks).
++
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <cstring>
++#include <memory>
++#include <string>
++
++#ifndef ASIO_STANDALONE
++#define ASIO_STANDALONE
++#endif
++#include <asio.hpp>
++
++#define RN_MAX_PLAYERS 8
++#define RN_MAGIC       0x4E435253u // "SRCN"
++#define RN_VERSION     1
++
++enum RaceNetRole { RN_OFF = 0, RN_HOST = 1, RN_CLIENT = 2 };
++
++enum RaceNetPacketType : uint8_t {
++    RNP_HELLO   = 1, // client -> host
++    RNP_WELCOME = 2, // host   -> client (playerId assigned)
++    RNP_STATE   = 3, // both ways (host relays)
++    RNP_BYE     = 4, // both ways
++    RNP_FULL    = 5, // host   -> client (room is full)
++};
++
++// What we send about one player every few frames.
++struct RaceState {
++    uint8_t playerId   = 0;
++    uint8_t flags      = 0; // bit1 = visible
++    uint16_t stage     = 0; // (stageList << 8) | stagePosition
++    int32_t xpos       = 0; // 16.16 fixed point, same as Entity
++    int32_t ypos       = 0;
++    int16_t rotation   = 0;
++    uint8_t animation  = 0;
++    uint8_t frame      = 0;
++    uint8_t direction  = 0;
++    uint8_t role       = 0; // game-mode specific (0 = runner, 1 = seeker ...)
++    uint32_t finishMs  = 0; // host-clock time of the last finish
++    uint8_t finishedPos = 0xFF; // stage position of that last finish, 0xFF = none yet
++};
++
++enum { RN_FLAG_VISIBLE = 2 };
++
++struct RaceRemote {
++    bool active = false;
++    RaceState state;
++    std::chrono::steady_clock::time_point lastSeen;
++    asio::ip::udp::endpoint endpoint; // host side only
++};
++
++class RaceNetCore
++{
++public:
++    RaceNetCore() : socket(io) {}
++    ~RaceNetCore() { stop(); }
++
++    // Returns false (and fills err) if the socket could not be set up.
++    bool start(RaceNetRole role, const std::string &host, uint16_t port, std::string *err = nullptr);
++    void stop();
++
++    // Call once per frame. Receives everything pending, handles timeouts and hello retries.
++    void poll();
++
++    // Queue our own state (host: relayed to clients, client: sent to host).
++    void sendState(const RaceState &s);
++
++    bool running() const { return role != RN_OFF; }
++    RaceNetRole getRole() const { return role; }
++    int getLocalId() const { return localId; }                 // -1 until a client is welcomed
++    bool connected() const { return role == RN_HOST || localId >= 0; }
++    bool wasRejected() const { return rejected; }
++    const std::array<RaceRemote, RN_MAX_PLAYERS> &getRemotes() const { return remotes; }
++
++    // Host clock in ms (clients estimate it from the WELCOME), used to order finishers fairly.
++    uint32_t hostTimeMs() const;
++
++    static constexpr int TIMEOUT_MS = 5000;
++
++private:
++    static constexpr size_t PACKET_BYTES = 29;
++    static void encode(uint8_t type, const RaceState &s, uint8_t *out);
++    static bool decode(const uint8_t *in, size_t len, uint8_t *type, RaceState *s);
++
++    void send(const uint8_t *buf, const asio::ip::udp::endpoint &to);
++    void handle(const uint8_t *buf, size_t len, const asio::ip::udp::endpoint &from);
++    int findClient(const asio::ip::udp::endpoint &ep) const;
++
++    asio::io_context io;
++    asio::ip::udp::socket socket;
++    asio::ip::udp::endpoint hostEndpoint;
++
++    RaceNetRole role = RN_OFF;
++    int localId      = -1;
++    bool rejected    = false;
++    std::array<RaceRemote, RN_MAX_PLAYERS> remotes;
++
++    std::chrono::steady_clock::time_point startTime;
++    std::chrono::steady_clock::time_point lastHello;
++    std::chrono::steady_clock::time_point lastHostSeen;
++    int64_t clockOffsetMs = 0; // client: hostClock - ourClock, learned from WELCOME
++};
++
++#endif
+diff --git a/RSDKv4/RetroEngine.cpp b/RSDKv4/RetroEngine.cpp
+index 5f48c28..8b79fda 100644
+--- a/RSDKv4/RetroEngine.cpp
++++ b/RSDKv4/RetroEngine.cpp
+@@ -291,6 +291,7 @@ void RetroEngine::Init()
+ #endif
+ #if RETRO_USE_NETWORKING
+     InitNetwork();
++    RaceNet_Init();
+ #endif
+ 
+     char dest[0x200];
+@@ -605,6 +606,7 @@ void RetroEngine::Run()
+ #if !RETRO_USE_ORIGINAL_CODE
+     ReleaseInputDevices();
+ #if RETRO_USE_NETWORKING
++    RaceNet_Release();
+     DisconnectNetwork(true);
+ #endif
+     WriteSettings();
+diff --git a/RSDKv4/RetroEngine.hpp b/RSDKv4/RetroEngine.hpp
+index 803ae1f..cb330d5 100644
+--- a/RSDKv4/RetroEngine.hpp
++++ b/RSDKv4/RetroEngine.hpp
+@@ -338,6 +338,7 @@ extern bool engineDebugMode;
+ #include "Sprite.hpp"
+ #include "Text.hpp"
+ #include "Networking.hpp"
++#include "RaceNet.hpp"
+ #include "Renderer.hpp"
+ #include "Userdata.hpp"
+ #include "Debug.hpp"
+diff --git a/RSDKv4/Scene.cpp b/RSDKv4/Scene.cpp
+index a450c82..3762c8e 100644
+--- a/RSDKv4/Scene.cpp
++++ b/RSDKv4/Scene.cpp
+@@ -246,6 +246,9 @@ void ProcessStage(void)
+ 
+             // Update
+             ProcessObjects();
++#if RETRO_USE_NETWORKING
++            RaceNet_Update();
++#endif
+ 
+             if (cameraTarget > -1) {
+                 if (cameraEnabled == 1) {
+diff --git a/RSDKv4/Userdata.cpp b/RSDKv4/Userdata.cpp
+index a48e211..cc585c0 100644
+--- a/RSDKv4/Userdata.cpp
++++ b/RSDKv4/Userdata.cpp
+@@ -274,6 +274,11 @@ void InitUserdata()
+         ini.SetString("Network", "Host", (char *)"127.0.0.1");
+         StrCopy(networkHost, "127.0.0.1");
+         ini.SetInteger("Network", "Port", networkPort = 50);
++
++        ini.SetInteger("Multiplayer", "Mode", raceMode = 0);
++        ini.SetString("Multiplayer", "Address", (char *)"127.0.0.1");
++        StrCopy(raceHostAddress, "127.0.0.1");
++        ini.SetInteger("Multiplayer", "Port", racePort = 7777);
+ #endif
+ 
+         ini.SetBool("Window", "FullScreen", Engine.startFullScreen = DEFAULT_FULLSCREEN);
+@@ -426,6 +431,13 @@ void InitUserdata()
+             StrCopy(networkHost, "127.0.0.1");
+         if (!ini.GetInteger("Network", "Port", &networkPort))
+             networkPort = 50;
++
++        if (!ini.GetInteger("Multiplayer", "Mode", &raceMode))
++            raceMode = 0;
++        if (!ini.GetString("Multiplayer", "Address", raceHostAddress))
++            StrCopy(raceHostAddress, "127.0.0.1");
++        if (!ini.GetInteger("Multiplayer", "Port", &racePort))
++            racePort = 7777;
+ #endif
+ 
+         if (!ini.GetBool("Window", "FullScreen", &Engine.startFullScreen))
+@@ -706,6 +718,14 @@ void WriteSettings()
+     ini.SetString("Network", "Host", networkHost);
+     ini.SetComment("Network", "PortComment", "The port the game will try to connect to.");
+     ini.SetInteger("Network", "Port", networkPort);
++
++    ini.SetComment("Multiplayer", "ModeComment",
++                   "Race multiplayer for any stage: 0 = off, 1 = host a room, 2 = join a room at Address");
++    ini.SetInteger("Multiplayer", "Mode", raceMode);
++    ini.SetComment("Multiplayer", "AddressComment", "The host's IP address (only used when Mode = 2)");
++    ini.SetString("Multiplayer", "Address", raceHostAddress);
++    ini.SetComment("Multiplayer", "PortComment", "UDP port. The host must allow it through the firewall / port forward it");
++    ini.SetInteger("Multiplayer", "Port", racePort);
+ #endif
+ 
+     ini.SetComment("Window", "FSComment", "Determines if the window will be fullscreen or not");

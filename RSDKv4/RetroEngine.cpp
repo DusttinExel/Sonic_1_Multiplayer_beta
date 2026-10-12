@@ -291,6 +291,7 @@ void RetroEngine::Init()
 #endif
 #if RETRO_USE_NETWORKING
     InitNetwork();
+    RaceNet_Init();
 #endif
 
     char dest[0x200];
@@ -605,6 +606,7 @@ void RetroEngine::Run()
 #if !RETRO_USE_ORIGINAL_CODE
     ReleaseInputDevices();
 #if RETRO_USE_NETWORKING
+    RaceNet_Release();
     DisconnectNetwork(true);
 #endif
     WriteSettings();

@@ -37,6 +37,8 @@ set(RETRO_FILES
     RSDKv4/Math.cpp
     RSDKv4/ModAPI.cpp
     RSDKv4/Networking.cpp
+    RSDKv4/RaceNet.cpp
+    RSDKv4/RaceNetCore.cpp
     RSDKv4/Object.cpp
     RSDKv4/Palette.cpp
     RSDKv4/Reader.cpp

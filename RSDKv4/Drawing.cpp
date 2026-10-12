@@ -1241,6 +1241,10 @@ void DrawStageGFX()
         DrawObjectList(6);
     }
 
+#if RETRO_USE_NETWORKING
+    RaceNet_Draw();
+#endif
+
 #if !RETRO_USE_ORIGINAL_CODE
     if (drawStageGFXHQ)
         DrawDebugOverlays();

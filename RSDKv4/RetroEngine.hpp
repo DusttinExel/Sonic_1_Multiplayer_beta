@@ -338,6 +338,7 @@ extern bool engineDebugMode;
 #include "Sprite.hpp"
 #include "Text.hpp"
 #include "Networking.hpp"
+#include "RaceNet.hpp"
 #include "Renderer.hpp"
 #include "Userdata.hpp"
 #include "Debug.hpp"
