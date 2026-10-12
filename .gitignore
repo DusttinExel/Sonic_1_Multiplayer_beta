@@ -294,3 +294,6 @@ build-dir
 build/
 mods/
 *.rsdk
+build/
+mods/
+*.rsdk
